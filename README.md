@@ -35,10 +35,10 @@ VS Code Remote-SSH 连上远端后，会去 `update.code.visualstudio.com` 下�
 升级后的标准流程：
 
 1. 用新版 VS Code 连一次 **HPC2**（它有外网，会自动下好新 server）
-2. 在 hpc2 上跑 `./sync-vscode-server.sh`
+2. 在 HPC2 上跑 `./sync-vscode-server.sh`
 3. 再连 HPC3
 
-如果不想先连 hpc2，也可以直接：
+如果不想先连 HPC2，也可以直接：
 
 ```bash
 ./sync-vscode-server.sh --commit <新commit> --download
@@ -64,27 +64,3 @@ commit 可以在 VS Code 里 `Help → About` 查到。
 ```
 
 收尾动作还包括：修正可执行位、删除 `~/.vscode-server/` 下 0 字节的下载残留（否则客户端可能把它当缓存用，导致继续报错）。
-
-## 实测
-
-首次同步 commit `df53daab...`（VS Code 1.132.0）：
-
-```
-818M  →  48 秒  @ 16.55 MB/s
-```
-
-用 `rsync -a --partial`，中断可续传，重跑只补差异。
-
-## 已知边界
-
-- **只处理 server 本身，不含扩展。** 远端扩展装在 `~/.vscode-server/extensions/`，同样需要外网才能从市场下载。要一并同步的话：
-
-  ```bash
-  rsync -a --partial --info=progress2 \
-    ~/.vscode-server/extensions/ HPC3:.vscode-server/extensions/
-  ```
-
-  注意扩展的 `machineId`/平台相关部分在同架构（都是 linux-x64）下可以直接复用。
-
-- **架构写死 linux-x64**（`--download` 模式的下载链接）。hpc2 和 HPC3 都是 x86_64，够用。
-- **依赖 hpc2 的代理**只在 `--download` 模式；纯复制模式不需要外网。
