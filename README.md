@@ -1,12 +1,13 @@
 # vscode-server-sync
 
-把 VS Code Server 从有外网的 **hpc2** 同步到无外网的 **HPC3**，让 Remote-SSH 连接时跳过下载直接启动。
+把 VS Code Server 从有外网的 **HPC2** 同步到无外网的 **HPC3**，让 Remote-SSH 连接时跳过下载直接启动。
+
+## SSH配置
+在 HPC2的 `~/.ssh/config` 下添加HPC3的 Host 配置。
 
 ## 解决什么问题
 
-VS Code Remote-SSH 连上远端后，会去 `update.code.visualstudio.com` 下载与本地客户端 commit 完全一致的 server。HPC3 没有外网，这一步必然卡死——典型症状是 `~/.vscode-server/` 下留一堆 **0 字节**的 `vscode-cli-<commit>.tar.gz`。
-
-hpc2 有外网（走 mihomo 代理），且你平时就在用 VS Code 连它，所以那边已经躺着现成的 server。直接复制过去即可。
+VS Code Remote-SSH 连上远端后，会去 `update.code.visualstudio.com` 下载与本地客户端 commit 完全一致的 server。HPC3 无法连网，这一步必然卡死——典型症状是 `~/.vscode-server/` 下留一堆 **0 字节**的 `vscode-cli-<commit>.tar.gz`。
 
 ## 用法
 
@@ -33,7 +34,7 @@ hpc2 有外网（走 mihomo 代理），且你平时就在用 VS Code 连它，�
 
 升级后的标准流程：
 
-1. 用新版 VS Code 连一次 **hpc2**（它有外网，会自动下好新 server）
+1. 用新版 VS Code 连一次 **HPC2**（它有外网，会自动下好新 server）
 2. 在 hpc2 上跑 `./sync-vscode-server.sh`
 3. 再连 HPC3
 
