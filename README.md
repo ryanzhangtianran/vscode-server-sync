@@ -7,8 +7,8 @@
 ## 前提
 
 - 源机能免密 SSH 到目标机（脚本用 `BatchMode`，不会弹密码）：在源机 `~/.ssh/config` 里配好目标机的 Host，并装好公钥
-- 目标机是 Linux，架构为 x86_64 / aarch64 / armv7l。脚本会读目标机的架构：和源机一样就直接复用源机已有的 server；不一样就必须加 `--download`，按目标机架构下载
-- 两边都有 `rsync`；目标机有 `python3`（用来改 `lru.json`）
+- 目标机是 Linux，架构为 x86_64 / aarch64 / armv7l。脚本会读目标机的架构：和源机一样且源机已有这个版本就直接复用；否则按目标机架构自动下载到临时目录，传完即删
+- 两边都有 `rsync` 时用它传（可续传）；任一端没有就自动改用 `tar` 走 ssh 传（不能续传）。目标机不需要 python
 - 目标机的 glibc 满足 VS Code Server 的最低要求（老系统如 CentOS 7 可能跑不起来，这与是否联网无关）
 - 只处理 Stable 版，不处理 Insiders
 
@@ -18,39 +18,38 @@ VS Code Remote-SSH 连上远端后，会去 `update.code.visualstudio.com` 下�
 
 ## 用法
 
-直接运行、不带参数，会进入交互菜单（类似 3x-ui）：
+不带参数运行进入菜单（类似 3x-ui）：
 
 ```
 +----------------------------------------------+
-|  VS Code Server 同步工具                     |
-|  目标机: HPC3    本机架构: x64               |
+|  VS Code Server 同步    目标机: HPC3         |
 +----------------------------------------------+
-|  1. 同步最近使用的版本                       |
-|  2. 同步指定 commit                          |
-|  3. 列出本机版本                             |
+|  1. 同步当前版本                             |
+|  2. 同步指定版本                             |
+|  3. 本机已有版本                             |
 +----------------------------------------------+
 |  4. 切换目标机                               |
-|  5. 允许下载 (--download): 关                |
-|  6. 强制重传 (--force):    关                |
+|  5. 强制重传: 关                             |
 +----------------------------------------------+
 |  0. 退出                                     |
 +----------------------------------------------+
-请输入选择 [0-6]:
+选择 [0-5]:
 ```
+
+启动时先选目标机：列出 `~/.ssh/config` 里的 Host（跳过通配符），输编号选择，也可直接输地址，直接回车用默认的 HPC3。之后可用「4. 切换目标机」再换。
 
 带参数则直接执行，不进菜单（适合脚本/cron）：
 
 ```bash
-./sync-vscode-server.sh --host HPC3  # 同步本地最近使用的版本（最常用）
+./sync-vscode-server.sh --host HPC3  # 同步本机 VS Code 客户端的版本（最常用）
 ./sync-vscode-server.sh --list       # 看本地有哪些版本
 ./sync-vscode-server.sh --dry-run    # 只看会传什么，不实际传
 ```
 
 | 选项 | 说明 |
 |---|---|
-| `--commit <hash>` | 指定 commit，默认取 `lru.json` 首项（= 最近用过的） |
+| `--commit <hash>` | 指定 commit，默认取本机 VS Code 客户端的版本；找不到客户端时取 `lru.json` 首项 |
 | `--host <别名>` | 目标机的 ssh 别名或地址，默认 `HPC3`（读 `~/.ssh/config`） |
-| `--download` | 本机没有可用的该 commit 时，按**目标机**架构下载到临时目录，传完即删，不动本机 `~/.vscode-server`（需能联网） |
 | `--force` | 远端已存在也重传 |
 | `--list` | 列出本地版本后退出 |
 | `--dry-run` | 空跑 |
@@ -70,7 +69,7 @@ VS Code Remote-SSH 连上远端后，会去 `update.code.visualstudio.com` 下�
 如果不想先连源机，也可以在源机上直接：
 
 ```bash
-./sync-vscode-server.sh --host <目标机> --commit <新commit> --download
+./sync-vscode-server.sh --host <目标机> --commit <新commit>
 ```
 
 commit 可以在 VS Code 里 `Help → About` 查到。
