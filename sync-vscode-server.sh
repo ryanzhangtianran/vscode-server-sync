@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把 VS Code Server 从有外网的 HPC2 同步到无外网的 HPC3，
+# 把本机（有外网）的 VS Code Server 同步到任意无外网的 Linux 主机，
 # 使 Remote-SSH 连接时无需下载即可直接启动。
 #
 # VS Code 1.86+ 的远端布局：
@@ -12,6 +12,17 @@ LOCAL_ROOT="$HOME/.vscode-server"
 REMOTE_HOST="HPC3"
 REMOTE_ROOT=".vscode-server"
 UPDATE_API="https://update.code.visualstudio.com"
+
+# uname -m -> 微软下载链接里的平台名
+vscode_arch() {
+  case "$1" in
+    x86_64)        echo x64 ;;
+    aarch64|arm64) echo arm64 ;;
+    armv7l)        echo armhf ;;
+    *)             echo "unknown-$1" ;;
+  esac
+}
+LOCAL_ARCH=$(vscode_arch "$(uname -m)")
 
 COMMIT=""
 DO_DOWNLOAD=0
@@ -26,7 +37,7 @@ usage() {
 选项:
   --commit <hash>   指定要同步的 commit（默认取本地最近使用的那个）
   --host <别名>     目标主机的 ssh 别名或地址（默认 HPC3）
-  --download        本地缺少该 commit 时，从微软更新服务器下载（需要代理可用）
+  --download        本机没有可用的该 commit 时，按目标机架构下载到临时目录，传完即删（需要代理可用）
   --force           目标已存在也重新同步
   --list            列出本地已有的 commit 后退出
   --dry-run         只显示将要执行的操作，不实际传输
@@ -41,6 +52,59 @@ EOF
 log()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m警告:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m错误:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# 交互菜单：每个选项都是用对应参数重新调用本脚本，子进程退出不影响菜单
+menu() {
+  local W=46 line g='\033[32m' r='\033[0m' choice c h
+  line="+$(printf '%*s' "$W" '' | tr ' ' -)+"
+  onoff() { [ "$1" = 1 ] && printf "${g}开${r}" || printf '关'; }
+  # 带框的一行：按显示宽度补空格（中文占 2 格 = 3 字节减 1 个续字节/2）
+  row() {
+    local plain b cont
+    plain=$(printf '%b' "$1" | sed $'s/\033\\[[0-9;]*m//g')
+    b=$(printf %s "$plain" | LC_ALL=C wc -c)
+    cont=$(printf %s "$plain" | LC_ALL=C tr -dc '\200-\277' | LC_ALL=C wc -c)
+    printf "|  %b%*s|\n" "$1" $((W - 2 - b + cont / 2)) ''
+  }
+  while true; do
+    local extra=()
+    [ "$DO_DOWNLOAD" = 1 ] && extra+=(--download)
+    [ "$FORCE" = 1 ]       && extra+=(--force)
+    clear 2>/dev/null || true
+    echo "$line"
+    row "VS Code Server 同步工具"
+    row "目标机: ${g}${REMOTE_HOST}${r}    本机架构: ${LOCAL_ARCH}"
+    echo "$line"
+    row "${g}1.${r} 同步最近使用的版本"
+    row "${g}2.${r} 同步指定 commit"
+    row "${g}3.${r} 列出本机版本"
+    echo "$line"
+    row "${g}4.${r} 切换目标机"
+    row "${g}5.${r} 允许下载 (--download): $(onoff "$DO_DOWNLOAD")"
+    row "${g}6.${r} 强制重传 (--force):    $(onoff "$FORCE")"
+    echo "$line"
+    row "${g}0.${r} 退出"
+    echo "$line"
+    read -rp "请输入选择 [0-6]: " choice || exit 0
+    case "$choice" in
+      1) bash "$0" --host "$REMOTE_HOST" ${extra[@]+"${extra[@]}"} || true ;;
+      2) read -rp "commit（Help → About 里查）: " c
+         [ -n "$c" ] && { bash "$0" --host "$REMOTE_HOST" --commit "$c" ${extra[@]+"${extra[@]}"} || true; } ;;
+      3) bash "$0" --list || true ;;
+      4) read -rp "目标机 ssh 别名或地址 [$REMOTE_HOST]: " h
+         REMOTE_HOST="${h:-$REMOTE_HOST}"; continue ;;
+      5) DO_DOWNLOAD=$((1 - DO_DOWNLOAD)); continue ;;
+      6) FORCE=$((1 - FORCE)); continue ;;
+      0) exit 0 ;;
+      *) warn "无效选择: $choice" ;;
+    esac
+    echo "$line"
+    read -rp "按回车返回菜单..." _ || exit 0
+  done
+}
+
+# 不带参数且在终端里运行时进入菜单
+[ $# -eq 0 ] && [ -t 0 ] && menu
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -78,62 +142,20 @@ fi
 # ---------- 1. 确定 commit ----------
 if [ -z "$COMMIT" ]; then
   lru="$LOCAL_ROOT/cli/servers/lru.json"
-  [ -r "$lru" ] || die "找不到 $lru，请用 --commit 显式指定"
+  [ -r "$lru" ] || die "找不到 ${lru}，请用 --commit 显式指定"
   COMMIT=$(grep -oE 'Stable-[0-9a-f]{40}' "$lru" | head -1 | sed 's/^Stable-//')
   [ -n "$COMMIT" ] || die "无法从 lru.json 解析 commit，请用 --commit 显式指定"
-  log "自动选定 commit: $COMMIT（本地最近使用）"
+  log "自动选定 commit: ${COMMIT}（本地最近使用）"
 else
   log "指定 commit: $COMMIT"
 fi
 
 echo "$COMMIT" | grep -qE '^[0-9a-f]{40}$' || die "commit 格式不对，应为 40 位十六进制"
 
-SRC_SERVER="$LOCAL_ROOT/cli/servers/Stable-$COMMIT/server"
-SRC_CLI="$LOCAL_ROOT/code-$COMMIT"
-
-# ---------- 2. 本地缺失时按需下载 ----------
-download_missing() {
-  local tmp
-  tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' RETURN
-
-  if [ ! -d "$SRC_SERVER" ]; then
-    log "本地缺少 server，正在下载 commit:$COMMIT"
-    curl -fL --progress-bar "$UPDATE_API/commit:$COMMIT/server-linux-x64/stable" \
-      -o "$tmp/server.tar.gz" || die "server 下载失败（检查代理是否开启）"
-    mkdir -p "$SRC_SERVER"
-    tar -xzf "$tmp/server.tar.gz" -C "$SRC_SERVER" --strip-components=1
-    log "server 已解压到 $SRC_SERVER"
-  fi
-
-  if [ ! -f "$SRC_CLI" ]; then
-    log "本地缺少 CLI，正在下载"
-    curl -fL --progress-bar "$UPDATE_API/commit:$COMMIT/cli-linux-x64/stable" \
-      -o "$tmp/cli.tar.gz" || die "CLI 下载失败（检查代理是否开启）"
-    tar -xzf "$tmp/cli.tar.gz" -C "$tmp"
-    [ -f "$tmp/code" ] || die "CLI 包结构异常，未找到 code 可执行文件"
-    mv "$tmp/code" "$SRC_CLI"
-    chmod 755 "$SRC_CLI"
-    log "CLI 已安装到 $SRC_CLI"
-  fi
-}
-
-if [ ! -d "$SRC_SERVER" ] || [ ! -f "$SRC_CLI" ]; then
-  if [ "$DO_DOWNLOAD" = 1 ]; then
-    download_missing
-  else
-    [ -d "$SRC_SERVER" ] || warn "本地缺少 server: $SRC_SERVER"
-    [ -f "$SRC_CLI" ]    || warn "本地缺少 CLI: $SRC_CLI"
-    die "本地文件不全。加 --download 让脚本自动下载，或用 --list 看看有哪些版本"
-  fi
-fi
-
-SRC_SIZE=$(du -sh "$SRC_SERVER" | cut -f1)
-log "源文件就绪: server $SRC_SIZE + CLI $(du -h "$SRC_CLI" | cut -f1)"
-
-# ---------- 3. 检查远端 ----------
+# ---------- 2. 检查远端 ----------
 log "检查 $REMOTE_HOST 现状"
 REMOTE_STATE=$(ssh -o BatchMode=yes "$REMOTE_HOST" "
+  echo ARCH=\$(uname -m)
   s=\$HOME/$REMOTE_ROOT/cli/servers/Stable-$COMMIT/server
   c=\$HOME/$REMOTE_ROOT/code-$COMMIT
   [ -x \$s/bin/code-server ] && echo SERVER_OK || echo SERVER_MISSING
@@ -147,6 +169,47 @@ if echo "$REMOTE_STATE" | grep -q SERVER_OK && echo "$REMOTE_STATE" | grep -q CL
   exit 0
 fi
 
+# server 含原生二进制，必须按目标机架构准备
+ARCH=$(vscode_arch "$(echo "$REMOTE_STATE" | sed -n 's/^ARCH=//p')")
+case "$ARCH" in unknown-*) die "不支持的目标机架构: ${ARCH#unknown-}" ;; esac
+
+SRC_SERVER="$LOCAL_ROOT/cli/servers/Stable-$COMMIT/server"
+SRC_CLI="$LOCAL_ROOT/code-$COMMIT"
+
+# ---------- 3. 准备源文件 ----------
+# 同架构且本机已有完整的一份就直接复用，否则下载到临时目录，脚本退出时删掉
+if [ "$ARCH" != "$LOCAL_ARCH" ] || [ ! -d "$SRC_SERVER" ] || [ ! -f "$SRC_CLI" ]; then
+  if [ "$ARCH" != "$LOCAL_ARCH" ]; then
+    log "目标机架构 $ARCH 与本机 $LOCAL_ARCH 不同，本机已有的 server 不能用"
+  else
+    [ -d "$SRC_SERVER" ] || warn "本机缺少 server: $SRC_SERVER"
+    [ -f "$SRC_CLI" ]    || warn "本机缺少 CLI: $SRC_CLI"
+  fi
+  [ "$DO_DOWNLOAD" = 1 ] || die "加 --download 让脚本按目标机架构下载（传完自动删除），或用 --list 看看本机有哪些版本"
+
+  STAGE=$(mktemp -d)
+  trap 'rm -rf "$STAGE"' EXIT
+  SRC_SERVER="$STAGE/server"
+  SRC_CLI="$STAGE/code"
+
+  log "下载 linux-$ARCH server，commit:$COMMIT"
+  curl -fL --progress-bar "$UPDATE_API/commit:$COMMIT/server-linux-$ARCH/stable" \
+    -o "$STAGE/server.tar.gz" || die "server 下载失败（检查代理是否开启）"
+  mkdir -p "$SRC_SERVER"
+  tar -xzf "$STAGE/server.tar.gz" -C "$SRC_SERVER" --strip-components=1
+
+  log "下载 linux-$ARCH CLI"
+  curl -fL --progress-bar "$UPDATE_API/commit:$COMMIT/cli-linux-$ARCH/stable" \
+    -o "$STAGE/cli.tar.gz" || die "CLI 下载失败（检查代理是否开启）"
+  tar -xzf "$STAGE/cli.tar.gz" -C "$STAGE"
+  [ -f "$SRC_CLI" ] || die "CLI 包结构异常，未找到 code 可执行文件"
+  chmod 755 "$SRC_CLI"
+  rm -f "$STAGE"/*.tar.gz
+fi
+
+SRC_SIZE=$(du -sh "$SRC_SERVER" | cut -f1)
+log "源文件就绪: server $SRC_SIZE + CLI $(du -h "$SRC_CLI" | cut -f1)"
+
 if [ "$DRY_RUN" = 1 ]; then
   log "[dry-run] 将传输 $SRC_SIZE 到 $REMOTE_HOST:~/$REMOTE_ROOT/"
   exit 0
@@ -156,7 +219,7 @@ fi
 log "创建远端目录"
 ssh -o BatchMode=yes "$REMOTE_HOST" "mkdir -p \$HOME/$REMOTE_ROOT/cli/servers/Stable-$COMMIT"
 
-log "同步 server（$SRC_SIZE，可中断续传）"
+log "同步 server（${SRC_SIZE}，可中断续传）"
 rsync -a --partial --info=progress2 \
   "$SRC_SERVER/" "$REMOTE_HOST:$REMOTE_ROOT/cli/servers/Stable-$COMMIT/server/"
 
